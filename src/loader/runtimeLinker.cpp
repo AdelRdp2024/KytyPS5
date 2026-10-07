@@ -39,6 +39,7 @@
 #endif
 #include <windows.h>
 #else
+#include <dlfcn.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
@@ -656,6 +657,31 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 	return true;
 }
 
+// Names the host module containing `address`, so host crashes in a driver or system library are
+// distinguishable from crashes in the emulator itself.
+static void PrintHostModule(const char* label, uint64_t address) {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	HMODULE module = nullptr;
+	char    path[MAX_PATH] {};
+	if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+	                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+	                       reinterpret_cast<LPCSTR>(address), &module) != 0 &&
+	    GetModuleFileNameA(module, path, sizeof(path)) != 0) {
+		std::printf("%s: %s+0x%" PRIx64 "\n", label, path,
+		            address - reinterpret_cast<uint64_t>(module));
+		return;
+	}
+#else
+	Dl_info dl_info {};
+	if (dladdr(reinterpret_cast<void*>(address), &dl_info) != 0 && dl_info.dli_fname != nullptr) {
+		std::printf("%s: %s+0x%" PRIx64 "\n", label, dl_info.dli_fname,
+		            address - reinterpret_cast<uint64_t>(dl_info.dli_fbase));
+		return;
+	}
+#endif
+	std::printf("%s: (no host module)\n", label);
+}
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -696,6 +722,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		            info->rax, info->rbx, info->rcx, info->rdx, info->rsi, info->rdi, info->rbp,
 		            info->rsp, info->r8, info->r9, info->r10, info->r11, info->r12, info->r13,
 		            info->r14, info->r15);
+		PrintHostModule("module", info->exception_address);
 		if (IsReadableRange(info->exception_address - 48, 96)) {
 			const auto* code = reinterpret_cast<const uint8_t*>(info->exception_address - 48);
 			std::printf("code (pc-48 .. pc+48, fault at byte 48):");
