@@ -141,7 +141,8 @@ void CollectComputeInputs(const ShaderComputeInputInfo* compute, ShaderInfo& inf
 	}
 }
 
-void AddBuiltinInput(ShaderInfo& info, StageInputKind kind) {
+void AddBuiltinInput(ShaderInfo& info, StageInputKind kind,
+                     bool fragment_shader_barycentric) {
 	switch (kind) {
 		case StageInputKind::VertexIndex:
 			AddInput(info, kind, 0, 1, "gl_VertexIndex");
@@ -165,12 +166,17 @@ void AddBuiltinInput(ShaderInfo& info, StageInputKind kind) {
 		case StageInputKind::BaryCoordSmoothSample:
 			AddInput(info, StageInputKind::SampleId, 0, 1, "gl_SampleID");
 			[[fallthrough]];
+		// Without host barycentrics the builtin is left undeclared and reads as zero.
 		case StageInputKind::BaryCoordSmooth:
 		case StageInputKind::BaryCoordSmoothCentroid:
-			AddInput(info, StageInputKind::BaryCoordSmooth, 0, 3, "gl_BaryCoordKHR");
+			if (fragment_shader_barycentric) {
+				AddInput(info, StageInputKind::BaryCoordSmooth, 0, 3, "gl_BaryCoordKHR");
+			}
 			break;
 		case StageInputKind::BaryCoordNoPerspective:
-			AddInput(info, kind, 0, 3, "gl_BaryCoordNoPerspKHR");
+			if (fragment_shader_barycentric) {
+				AddInput(info, kind, 0, 3, "gl_BaryCoordNoPerspKHR");
+			}
 			break;
 		case StageInputKind::WorkgroupId:
 			AddInput(info, kind, 0, 3, "gl_WorkGroupID");
@@ -268,6 +274,7 @@ void CollectOutput(const Program& program, ShaderStageInputInfo input_info,
 }
 
 struct InputUsage {
+	bool fragment_shader_barycentric = true;
 	std::array<uint8_t, 32> components {};
 	std::array<bool, 32> per_vertex {};
 	std::array<bool, NumScalarRegs> user_data {};
@@ -408,6 +415,12 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 			if (inst.Arg(0).U32() >= input_info.pixel->input_num ||
 			    inst.Arg(1).U32() >= 4u || inst.Arg(2).U32() >= 3u) {
 				return Fail("interpolation parameter reference is out of range");
+			}
+			// Raw vertex reads need per-vertex inputs, which only exist with host
+			// barycentrics. Otherwise the emitter approximates them from the
+			// interpolated value.
+			if (!inputs.fragment_shader_barycentric) {
+				break;
 			}
 			const auto input = inst.Arg(0).U32();
 			inputs.per_vertex[input] |= inst.Arg(2).U32() < 2u ||
@@ -551,7 +564,8 @@ void Visit(Program& program, ShaderStageInputInfo input_info, InputUsage& inputs
 
 } // namespace
 
-void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
+void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info,
+                       bool fragment_shader_barycentric) {
 	if (!program.resource_tracking_complete || program.shader_info_complete) {
 		return Fail(!program.resource_tracking_complete ? "shader resources were not tracked"
 		                                                : "shader info already collected");
@@ -572,6 +586,7 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 	    info.function_lds = info.function_scratch = info.pixel_valid_mask = info.buffer_int64_atomics =
 	    info.buffer_u8 = info.buffer_u16 = info.shared_int64_atomics = info.coherent_buffers = info.float64 = false;
 	InputUsage inputs;
+	inputs.fragment_shader_barycentric = fragment_shader_barycentric;
 	for (const auto* block: program.blocks) {
 		for (const auto& inst: *block) {
 			Visit(program, input_info, inputs, inst);
@@ -598,7 +613,7 @@ void CollectShaderInfo(Program& program, ShaderStageInputInfo input_info) {
 		default: return Fail("unsupported shader stage for info collection");
 	}
 	for (uint32_t i = 0; i < inputs.builtin_count; i++) {
-		AddBuiltinInput(info, inputs.builtins[i]);
+		AddBuiltinInput(info, inputs.builtins[i], fragment_shader_barycentric);
 	}
 	program.shader_info_complete = true;
 }
